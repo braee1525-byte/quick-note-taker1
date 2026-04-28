@@ -1,0 +1,5 @@
+ def_val =0
+#i
+ for char in string :
+ sum_vval +=ord(char)
+ return sum_val % hash_max
