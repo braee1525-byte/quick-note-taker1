@@ -1,237 +1,218 @@
 window.addEventListener('DOMContentLoaded', async () => {
-
     const textarea = document.getElementById('note');
+    function updateWordCount() {
+        const text = textarea.value;
+        const characters = text.length;
+        const words = text.trim() === '' ? 0 : text.trim().split(/\s+/).length;
+        const wordCountEl = document.getElementById('word-count');
+        wordCountEl.textContent = `Words: ${words} | Characters: ${characters}`;
+    }
+    const titleInput = document.getElementById('note-title');
     const saveBtn = document.getElementById('save');
-    const saveAsBtn = document.getElementById('saveAs');
-    const newNoteBtn = document.getElementById('newNote');
-    const openBtn = document.getElementById('openFile');
-    const deleteBtn = document.getElementById('deleteBtn');
-    const statusEl = document.getElementById('status');
+    const statusEl = document.getElementById('save_status');
+    const saveAsBtn = document.getElementById('save-as');
+    const newNoteBtn = document.querySelectorAll('#new-note')[0]; // first "New Note" in sidebar
+    const deleteBtn = document.getElementById('delete-note'); // single note delete
+    const deleteAllBtn = document.getElementById('delete-all'); // delete all notes
+    const openFileBtn = document.getElementById('open-file');
+    const noteList = document.getElementById('notes-list');
 
-    // Load saved note
-    const savedNote = await window.electronAPI.loadNote();
-    textarea.value = savedNote;
-
-    let lastSavedText = textarea.value;
+    // state
+    let notes = [];
+    let currentNoteId = null;
+    let lastSavedContent = '';
+    let debounceTimer = null;
     let currentFilePath = null;
 
-    // =========================
-    // AUTO SAVE
-    // =========================
+    // Load all notes at startup
+    notes = await window.electronAPI.getNotes();
+    if (notes.length > 0) {
+        const mostRecent = notes.reduce((a, b) =>
+            new Date(a.updatedAt) > new Date(b.updatedAt) ? a : b
+        );
+        await switchNote(mostRecent.id);
+    } else {
+        newNoteBtn.click();
+    }
+    renderNoteList();
+
+    // Manual Save
+    saveBtn.addEventListener('click', async () => {
+        await saveCurrentNote();
+    });
+
+    saveAsBtn.addEventListener('click', async () => {
+        const result = await window.electronAPI.saveAs(textarea.value);
+        if (result.success) {
+            lastSavedContent = textarea.value;
+            currentFilePath = result.filePath;
+            statusEl.textContent = 'Saved to: ${ result.filePath }';
+        } else {
+            statusEl.textContent = 'Save As cancelled';
+        }
+    });
+
+    newNoteBtn.addEventListener('click', async () => {
+        if (textarea.value !== lastSavedContent) {
+            const result = await window.electronAPI.newNote();
+            if (!result.confirmed) return;
+        }
+        const newNote = {
+            id: Date.now().toString(),
+            title: 'Untitled',
+            content: '',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+        await window.electronAPI.saveNoteJson(newNote);
+        notes.unshift(newNote);
+        currentNoteId = newNote.id;
+        titleInput.value = '';
+        textarea.value = '';
+        lastSavedContent = '';
+        renderNoteList();
+        statusEl.textContent = 'New note created.';
+        titleInput.focus();
+    });
+
+    deleteBtn.addEventListener('click', async () => {
+        if (!currentNoteId) return;
+        await deleteNote(currentNoteId);
+    });
+
+    deleteAllBtn.addEventListener('click', async () => {
+        notes = [];
+        currentNoteId = null;
+        textarea.value = '';
+        titleInput.value = '';
+        lastSavedContent = '';
+        statusEl.textContent = 'All notes deleted.';
+        renderNoteList();
+    });
+
+    openFileBtn.addEventListener('click', async () => {
+        const result = await window.electronAPI.openFile();
+        if (result.success) {
+            textarea.value = result.content;
+            lastSavedContent = result.content;
+            currentFilePath = result.filePath;
+            statusEl.textContent = 'Opened: ${ result.filePath }';
+        } else {
+            statusEl.textContent = 'Open canceled';
+        }
+    });
+
+    // Auto Save function
     async function autoSave() {
-
         const currentText = textarea.value;
-
-        if (currentText === lastSavedText) {
-            statusEl.textContent = 'No changes to save';
+        if (currentText === lastSavedContent) {
+            if (statusEl) statusEl.textContent = 'No changes - already saved';
             return;
         }
-
         try {
-
-            if (currentFilePath) {
-                await window.electronAPI.smartSave(
-                    currentText,
-                    currentFilePath
-                );
-            } else {
-                await window.electronAPI.saveNote(currentText);
-            }
-
-            lastSavedText = currentText;
-
+            await window.electronAPI.saveNote(currentText);
+            lastSavedContent = currentText;
             const now = new Date().toLocaleTimeString();
-
-            statusEl.textContent = `Auto-saved at ${now}`;
-            statusEl.style.color = 'green';
-
+            if (statusEl) statusEl.textContent = 'Auto - saved at ${ now }';
         } catch (err) {
-
-            console.error('Auto-save failed:', err);
-
-            statusEl.textContent = 'Auto-save error!';
-            statusEl.style.color = 'red';
+            console.error('Auto-save FAILED:', err);
+            if (statusEl) statusEl.textContent = 'Auto-save error - check console';
         }
     }
 
-    // =========================
-    // DEBOUNCE AUTO SAVE
-    // =========================
-    let debounceTimer;
-
+    // Call when user types
     textarea.addEventListener('input', () => {
-
-        statusEl.textContent =
-            'Changes detected — auto-saving in 5s...';
-
-        statusEl.style.color = 'orange';
-
+        updateWordCount();// NEW - add this line
+        statusEl.textContent = 'Unsaved changes...';
         clearTimeout(debounceTimer);
-
-        debounceTimer = setTimeout(autoSave, 5000);
+        debounceTimer = setTimeout(saveCurrentNote, 5000);
     });
 
-    // =========================
-    // SAVE BUTTON
-    // =========================
-    saveBtn.addEventListener('click', async () => {
-  try {
-    const result = await window.electronAPI.smartSave(textarea.value, currentFilePath);
-    lastSavedText = textarea.value;
-    currentFilePath = result.filePath;
-    statusEl.textContent = `Saved to: ${result.filePath}`;
-  } catch (err) {
-    console.error('Save failed:', err);
-    statusEl.textContent = 'Save failed!';
-  }
+    // Call when a note is loaded
+    async function switchNote(id) {
+        // ... existing code ...
+        textarea.value = note.content || '';
+        // NEW - add this line after setting textarea value
+        updateWordCount();
+    }
+
+titleInput.addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(autoSave, 5000);
 });
-    // =========================
-    // SAVE AS BUTTON
-    // =========================
-    saveAsBtn.addEventListener('click', async () => {
 
-        try {
-
-            const result =
-                await window.electronAPI.saveAs(textarea.value);
-
-            if (result && result.success) {
-
-                currentFilePath = result.filePath;
-                lastSavedText = textarea.value;
-
-                statusEl.textContent =
-                    `Saved to: ${result.filePath}`;
-
-                statusEl.style.color = 'green';
-
-            } else {
-
-                statusEl.textContent = 'Save As cancelled.';
-                statusEl.style.color = 'orange';
-            }
-
-        } catch (err) {
-
-            console.error('Save As failed:', err);
-
-            statusEl.textContent = 'Save As failed!';
-            statusEl.style.color = 'red';
-        }
+function renderNoteList() {
+    noteList.innerHTML = '';
+    notes.forEach(note => {
+        const item = document.createElement('div');
+        item.className = 'note-item' + (note.id === currentNoteId ? ' active' : '');
+        item.innerHTML = `
+                <button class="delete-note" data-id="${note.id}">X</button>
+                <div class="note-title">${note.title || 'Untitled'}</div>
+                <div class="note-date">${new Date(note.updatedAt).toLocaleString()}</div>
+            `;
+        item.addEventListener('click', async (e) => {
+            if (e.target.classList.contains('delete-note')) return;
+            await switchNote(note.id);
+        });
+        item.querySelector('.delete-note').addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await deleteNote(note.id);
+        });
+        noteList.appendChild(item);
     });
+}
 
-    // =========================
-    // NEW NOTE
-    // =========================
-    newNoteBtn.addEventListener('click', async () => {
+async function switchNote(id) {
+    if (textarea.value !== lastSavedContent) {
+        const result = await window.electronAPI.newNote();
+        if (!result.confirmed) return;
+    }
+    const note = notes.find(n => n.id === id);
+    if (!note) return;
+    currentNoteId = note.id;
+    titleInput.value = note.title || '';
+    textarea.value = note.content || '';
+    lastSavedContent = note.content || '';
+    statusEl.textContent = '';
+    renderNoteList();
+}
 
-        if (textarea.value === lastSavedText) {
+async function saveCurrentNote() {
+    if (!currentNoteId) return;
+    const note = {
+        id: currentNoteId,
+        title: titleInput.value || 'Untitled',
+        content: textarea.value
+    };
+    await window.electronAPI.saveNoteJson(note);
+    lastSavedContent = textarea.value;
+    const index = notes.findIndex(n => n.id === currentNoteId);
+    if (index !== -1) {
+        notes[index] = { ...note, updatedAt: new Date().toISOString() };
+    }
+    renderNoteList();
+    statusEl.textContent = `Note saved at ${new Date().toLocaleTimeString()}`;
+}
 
-            textarea.value = '';
-            currentFilePath = null;
+async function deleteNote(id) {
+    const result = await window.electronAPI.deleteNoteJson(id);
+    if (!result.confirmed) return;
+    await window.electronAPI.deleteNote(id);
+    notes = notes.filter(n => n.id !== id);
+    if (currentNoteId === id) {
+        currentNoteId = null;
+        titleInput.value = '';
+        textarea.value = '';
+        lastSavedContent = '';
+        statusEl.textContent = 'Note deleted.';
+    }
+    renderNoteList();
+}
 
-            statusEl.textContent = 'New note started.';
-            return;
-        }
-
-        const confirmed = await window.electronAPI.newNote();
-
-        if (confirmed) {
-
-            textarea.value = '';
-            lastSavedText = '';
-            currentFilePath = null;
-
-            statusEl.textContent = 'New note started.';
-
-        } else {
-
-            statusEl.textContent = 'New note cancelled.';
-        }
-    });
-
-    // =========================
-    // OPEN FILE
-    // =========================
-    openBtn.addEventListener('click', async () => {
-
-        try {
-
-            const result = await window.electronAPI.openFile();
-
-            if (result && result.success) {
-
-                textarea.value = result.content;
-
-                lastSavedText = result.content;
-
-                currentFilePath = result.filePath;
-
-                statusEl.textContent =
-                    `Opened: ${result.filePath}`;
-
-                statusEl.style.color = 'green';
-            }
-
-        } catch (err) {
-
-            console.error('Open file failed:', err);
-
-            statusEl.textContent = 'Open failed!';
-            statusEl.style.color = 'red';
-        }
-    });
-
-    // =========================
-    // DELETE NOTES
-    // =========================
-    deleteBtn.addEventListener('click', async () => {
-
-        const confirmed = confirm(
-            'Really delete ALL notes? This cannot be undone!'
-        );
-
-        if (!confirmed) return;
-
-        try {
-
-            await window.electronAPI.deleteNote();
-
-            textarea.value = '';
-            lastSavedText = '';
-            currentFilePath = null;
-
-            statusEl.textContent = 'All notes deleted!';
-            statusEl.style.color = 'red';
-
-        } catch (err) {
-
-            console.error('Delete failed:', err);
-
-            statusEl.textContent = 'Delete failed!';
-            statusEl.style.color = 'red';
-        }
-    });
-
-});
-// NEW: Menu action listeners
-
-window.electronAPI.onMenuAction('menu-new-note', () => {
-  // reuse the existing button logic
-  newNoteBtn.click();
-});
-
-window.electronAPI.onMenuAction('menu-open-file', () => {
-  // reuse the existing button logic
-  openFileBtn.click();
-});
-
-window.electronAPI.onMenuAction('menu-save', () => {
-  // reuse the existing button logic
-  saveBtn.click();
-});
-
-window.electronAPI.onMenuAction('menu-save-as', () => {
-  // reuse the existing button logic
-  saveAsBtn.click();
+// Menu action listeners
+window.electronAPI.onMenuAction('menu-new-note', () => newNoteBtn.click());
+window.electronAPI.onMenuAction('menu-open-file', () => openFileBtn.click());
+window.electronAPI.onMenuAction('menu-save', () => saveBtn.click());
+window.electronAPI.onMenuAction('menu-save-as', () => saveAsBtn.click());
 });
